@@ -29,4 +29,20 @@ Hazard Pointer的原理其实并不复杂，简单来讲，它维护了一个所
 这里有一点我其实一度是有点疑惑的，那就是，在线程B准备释放某个指针P，并且遍历全局数组发现指针P不在这个数组里面时；这个时候其他线程恰好抢占了CPU，将指针P添加到全局数组里面；接着当线程B继续执行时，岂不是会错误地释放指针P？
 {: .mt-4 .mb-0 }
 
-这毫无疑问是有可能的。
+这毫无疑问是有可能的。但Hazard Pointer的使用方式规避了这一可能。下面我们看看Hazard Pointer的使用方式。
+
+## Hazard Pointer的使用方式
+{: .mt-4 .mb-0 }
+
+首先，假设这么一个场景，在一个并发系统中，需要访问一个全局的数组，当数组的容量不够的时候，重新分配一个两倍大小的新数组，并将原来的数组释放掉。这个释放动作是非常危险的，因为可能有其他线程在访问旧数组，所以我们要通过Hazard Pointer来避免错误释放。释放的过程是这样的：
+```c
+    int *g_array;
+    ...
+    int *new_array = new int[2 * old_size]; // step 1
+    memcpy(new_array, g_array, old_size * sizeof(int *)); // step 2
+    int *old_array = g_array; // step 3
+    g_array = new_array; // step 4
+    bool found = scan_hzdptr(old_array); // step 5
+    if (!found) delete[] old_array;
+```
+可以看出，这里面有个关键步骤，也就是step 4，它将指向全局数组的指针指向了新分配的数组，这就保证了其他线程如果没有将旧的指针“保护”起来，再也不能访问到旧的数组了。于是在step 5扫描完Hazard Pointer数组之后，若没有线程正在使用旧的数组，那么就可以安全地释放旧的数组了。
