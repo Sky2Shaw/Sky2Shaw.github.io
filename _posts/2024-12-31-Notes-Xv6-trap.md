@@ -189,3 +189,29 @@ usertrap(void)
   usertrapret();
 }
 ```
+
+这段代码首先检查了sstatus寄存器的SPP位（该位标志了发生cpu模式切换前cpu所处的模式），如果是内核模式，会panic。回顾调用ecall指令时已经将SPP位置为0，所以这边会接着往下执行。接着将stvec寄存器保存的trap handle切换为kernelvec，这样发生中断时会跳转到kernelvec。接着读取sepc寄存器，并保存到trapframe的epc字段（sepc记录的是发生系统调用或trap时的pc）。接下来根据scause寄存器，即发生trap的原因，回顾调用ecall时已经将scause设置为0x8即系统调用，所以这里会走系统调用分支，其他分支我暂时也没有梳理清楚，所以这里只关注处理系统调用的分支：
+
+首先将trapframe中的epc字段加上4，这是为了当完成系统调用回到用户态时，在pc + 4的位置继续执行。接着开启中断，调用syscall函数。现在才开中断的原因，是为了保证sepc、scause、stvec、sstatus等寄存器的值都已经被正常获取或设置。一旦中断打开，发生trap时，这些寄存器都有可能被修改。
+
+我们看一下关键函数syscall到底做了什么：
+``` c
+void
+syscall(void)
+{
+  int num;
+  struct proc *p = myproc();
+
+  num = p->trapframe->a7;
+  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    // Use num to lookup the system call function for num, call it,
+    // and store its return value in p->trapframe->a0
+    p->trapframe->a0 = syscalls[num]();
+  } else {
+    printf("%d %s: unknown sys call %d\n",
+            p->pid, p->name, num);
+    p->trapframe->a0 = -1;
+  }
+}
+```
+好家伙，竟然如此简单。逻辑也很简单，就取处trapframe中的a7字段，即系统调用号，然后执行syscalls数组中的对应syscall。回想下，我们在ecall时已经将系统调用号设置到a7寄存器，又在trap handle（uservec）中将a7保存到trapframe中。系统调用号就是这样从用户空间传递到了内核空间。关于什么是trapframe，后面会追加一段内容详细分析。                   
