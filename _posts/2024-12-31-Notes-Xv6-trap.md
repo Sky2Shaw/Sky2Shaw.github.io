@@ -11,10 +11,10 @@ mermaid: true
 ---
 
 ## 前言
-接近年末，手头的项目都已收尾，闲来无事决定研究下操作系统。xv6是个很好的研究对象。于是一边结合文档看源码一边写lab。回来有空坐在飘窗上写写笔记ß，老婆带着熊娃在床上睡觉。于是有了以下内容。
+接近年末，手头的项目都已收尾，闲来无事决定研究下操作系统。xv6是个很好的研究对象。于是一边结合文档看源码一边写lab。回来有空坐在飘窗上写写笔记，老婆带着熊娃在床上睡觉。于是有了以下内容。
 
 ## 系统调用
-在学习xv6之前，系统调用在我的印象中就是操作系统开放给用户的一些列诸如open、fork之类的函数，并没有很深入地去了解其原理。
+在学习xv6之前，系统调用在我的印象中就是操作系统开放给用户的一些列诸如open、fork之类的函数，并没有很深入地去了解其原理。下面我们借助xv6来深入研究一下系统调用。
 在进一步讨论之前，我们先回顾下什么是系统调用。AI告诉我们：系统调用是用户程序与操作系统内核之间的接口，用于请求操作系统执行某些特权操作或访问受保护的资源。基础的图像是这样的：
 ![system call base picture](/assets/img/xv6.001.png)
 
@@ -31,9 +31,11 @@ start:
         li a7, SYS_exec
         ecall
 ```
-首先la a0, init将可执行文件的名称加载到a0寄存器，la a1, argv将参数加载到a1寄存器，li a7, SYS_exec将系统调用号加载到a7寄存器。所有相关寄存器都设置完毕后，执行了ecall指令。
+首先la a0, init将可执行文件的名称加载到a0寄存器，la a1, argv将参数加载到a1寄存器，li a7, SYS_exec将系统调用号加载到a7寄存器。所有相关寄存器都设置完毕后，执行了ecall指令，于是就发生了所谓的系统调用，也就是说：在risc-v架构中，系统调用是通过ecall来实现的。
 
-在学习ecall指令时，我们需要先了解risc-v CPU的三种模式以及相关的控制状态寄存器（Control and status register， CSR）。
+ecall指令会切换cpu模式并修改一些寄存器，然后设置pc（program counter，程序计数器，cpu从程序计数器指向的内存取指令并执行），让cpu跳转到指定的pc处继续执行。下面我们来深入研究下这个ecall指令：
+
+在学习ecall指令之前，我们需要先了解risc-v CPU的三种模式以及相关的控制状态寄存器（Control and status register， CSR）。
 三种模式：
 
 1. 用户模式
@@ -214,4 +216,116 @@ syscall(void)
   }
 }
 ```
-好家伙，竟然如此简单。逻辑也很简单，就取处trapframe中的a7字段，即系统调用号，然后执行syscalls数组中的对应syscall。回想下，我们在ecall时已经将系统调用号设置到a7寄存器，又在trap handle（uservec）中将a7保存到trapframe中。系统调用号就是这样从用户空间传递到了内核空间。关于什么是trapframe，后面会追加一段内容详细分析。                   
+好家伙，竟然如此简单：取trapframe中的a7字段，即系统调用号，然后执行syscalls数组中的对应syscall。回想下，我们在ecall时已经将系统调用号设置到a7寄存器，又在trap handle（uservec）中将a7保存到trapframe中。系统调用号就是这样从用户空间传递到了内核空间。关于什么是trapframe，后面会追加一段内容详细分析。                   
+
+接下来我们跟着函数流程，继续研究usertrapret函数：
+``` c
+//
+// return to user space
+//
+void
+usertrapret(void)
+{
+  struct proc *p = myproc();
+
+  // we're about to switch the destination of traps from
+  // kerneltrap() to usertrap(), so turn off interrupts until
+  // we're back in user space, where usertrap() is correct.
+  intr_off();
+
+  // send syscalls, interrupts, and exceptions to uservec in trampoline.S
+  uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
+  w_stvec(trampoline_uservec);
+
+  // set up trapframe values that uservec will need when
+  // the process next traps into the kernel.
+  p->trapframe->kernel_satp = r_satp();         // kernel page table
+  p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
+  p->trapframe->kernel_trap = (uint64)usertrap;
+  p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
+
+  // set up the registers that trampoline.S's sret will use
+  // to get to user space.
+  
+  // set S Previous Privilege mode to User.
+  unsigned long x = r_sstatus();
+  x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
+  x |= SSTATUS_SPIE; // enable interrupts in user mode
+  w_sstatus(x);
+
+  // set S Exception Program Counter to the saved user pc.
+  w_sepc(p->trapframe->epc);
+
+  // tell trampoline.S the user page table to switch to.
+  uint64 satp = MAKE_SATP(p->pagetable);
+
+  // jump to userret in trampoline.S at the top of memory, which 
+  // switches to the user page table, restores user registers,
+  // and switches to user mode with sret.
+  uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
+  ((void (*)(uint64))trampoline_userret)(satp);
+}
+```
+
+这个函数的功能如其名称所示，是用于返回到用户空间。因为在前面的进入内核空间时(usertrap)已经将trap的handle(保存于stvec寄存器中)设置为kernelvec，所以在返回用户空前前需要将trap的handle切回usertvec。接着将内核页表、内核栈、内核trap函数、硬件线程保存到trapframe中。然后设置sstatus寄存器，让cpu知道是由监督模式切换到用户模式的。接着开启中断，设置返回用户空间后的指令寄存器，计算用户空间页表，最后执行trampoline.S中的userret函数，并将用户空间页表作为参数传入。
+
+最后我们看一下trampoline.S中的userret函数：
+```
+userret:
+        # userret(pagetable)
+        # called by usertrapret() in trap.c to
+        # switch from kernel to user.
+        # a0: user page table, for satp.
+
+        # switch to the user page table.
+        sfence.vma zero, zero
+        csrw satp, a0
+        sfence.vma zero, zero
+
+        li a0, TRAPFRAME
+
+        # restore all but a0 from TRAPFRAME
+        ld ra, 40(a0)
+        ld sp, 48(a0)
+        ld gp, 56(a0)
+        ld tp, 64(a0)
+        ld t0, 72(a0)
+        ld t1, 80(a0)
+        ld t2, 88(a0)
+        ld s0, 96(a0)
+        ld s1, 104(a0)
+        ld a1, 120(a0)
+        ld a2, 128(a0)
+        ld a3, 136(a0)
+        ld a4, 144(a0)
+        ld a5, 152(a0)
+        ld a6, 160(a0)
+        ld a7, 168(a0)
+        ld s2, 176(a0)
+        ld s3, 184(a0)
+        ld s4, 192(a0)
+        ld s5, 200(a0)
+        ld s6, 208(a0)
+        ld s7, 216(a0)
+        ld s8, 224(a0)
+        ld s9, 232(a0)
+        ld s10, 240(a0)
+        ld s11, 248(a0)
+        ld t3, 256(a0)
+        ld t4, 264(a0)
+        ld t5, 272(a0)
+        ld t6, 280(a0)
+
+	# restore user a0
+        ld a0, 112(a0)
+        
+        # return to user mode and user pc.
+        # usertrapret() set up sstatus and sepc.
+        sret
+```
+这个函数首先切换用户态页表，接着将之前uservec保存在trapframe中的寄存器数据恢复回去，最后执行sret指令，sret进行了以下动作：
+1. 更新 PC：PC <- sepc
+2. 恢复特权级别：如果 sstatus.SPP 为 1，则进入监督模式；否则进入用户模式。
+3. 恢复中断使能状态：将 sstatus.SPIE 的值赋给 sstatus.SIE，然后将 sstatus.SPP 清零。
+
+至此，我们将xv6中trap的完整流程梳理了一遍。
