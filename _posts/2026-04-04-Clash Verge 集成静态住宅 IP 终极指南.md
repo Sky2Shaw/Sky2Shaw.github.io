@@ -4,6 +4,7 @@
 * **痛点**：直连海外住宅 IP（如 IPFLY 英国节点）极易出现 `Timeout`（超时）。
 * **原因**：住宅 IP 端口（如 5001）特征明显且跨境链路长，易受运营商拦截或 GFW 干扰。
 * **方案**：**链式代理（Proxy Chain）**。即：`南京本地` -> `机场高速节点 (入口)` -> `静态住宅 IP (出口)` -> `Claude API`。
+<img width="692" height="538" alt="image" src="https://github.com/user-attachments/assets/568cf036-c2ae-4e09-b04c-ce1961ef7018" />
 
 ### 2. 关键配置：Clash Verge 可视化操作
 在 Clash Verge 中，通过“代理链配置”界面可以直观完成：
@@ -18,6 +19,7 @@
 * **作用**：在系统层面拦截所有网络流量，强制导入代理链。
 * **优点**：无需在终端手动 `export http_proxy`，解决 Node.js 运行环境不走系统代理的问题。
 * **操作**：在 Clash Verge 首页点击 **“虚拟网卡模式”**（TUN Mode），确保开关为蓝色并显示“已启用”。
+<img width="701" height="548" alt="image" src="https://github.com/user-attachments/assets/54e7f287-0743-4011-9ed8-925ea5927489" />
 
 ### 4. 配置文件 (YAML) 核心逻辑
 如果你偏好手动维护配置文件，核心代码如下：
@@ -26,13 +28,6 @@
 proxies:
   - {name: "JMS-Entry", type: vmess, server: ..., port: ...} # 机场节点
   - {name: "IPFLY-Exit", type: socks5, server: ..., port: 5001, dialer-proxy: "JMS-Entry"} # 住宅IP挂载在入口上
-
-proxy-groups:
-  - name: "Claude-Relay"
-    type: relay
-    proxies:
-      - "JMS-Entry"
-      - "IPFLY-Exit"
 ```
 
 ### 5. 开发者避坑指南
